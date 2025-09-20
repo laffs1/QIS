@@ -1,15 +1,19 @@
 #!/bin/bash
 set -e
 
-echo "======================================="
-echo "   Home Assistant LXC Setup Script"
-echo "======================================="
-echo "Choose an option:"
-echo "1) Full Install (Home Assistant Core)"
-echo "2) Fix venv only"
-read -p "Enter choice [1-2]: " choice
+MODE="$1"
 
-if [ "$choice" == "1" ]; then
+if [ -z "$MODE" ]; then
+    echo "======================================="
+    echo "   Home Assistant LXC Setup Script"
+    echo "======================================="
+    echo "Usage: $0 [full|fix]"
+    echo "  full = Full Install (Home Assistant Core)"
+    echo "  fix  = Fix venv only"
+    read -p "Enter choice [full/fix]: " MODE
+fi
+
+if [ "$MODE" == "full" ]; then
     echo ">>> Updating system..."
     apt-get update -y && apt-get upgrade -y
 
@@ -89,7 +93,7 @@ EOL
     echo "Home Assistant Core is running at http://<your-lxc-ip>:8123"
     echo "It will auto-update weekly."
 
-elif [ "$choice" == "2" ]; then
+elif [ "$MODE" == "fix" ]; then
     echo ">>> Fixing venv in /srv/homeassistant..."
     sudo -u homeassistant -H bash <<'EOF'
 cd /srv/homeassistant
@@ -103,6 +107,7 @@ EOF
     echo ">>> venv fixed. Home Assistant restarted (if service exists)."
 
 else
-    echo "Invalid choice. Exiting."
+    echo "Invalid choice: $MODE"
+    echo "Usage: $0 [full|fix]"
     exit 1
 fi
