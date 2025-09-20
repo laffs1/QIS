@@ -46,7 +46,7 @@ if [ "$MODE" == "full" ]; then
     mkdir -p /srv/homeassistant
     chown homeassistant:homeassistant /srv/homeassistant
 
-    sudo -u homeassistant -H bash <<'EOF'
+    sudo -u homeassistant -H bash <<EOF
 cd /srv/homeassistant
 python3 -m venv --without-pip .
 curl -sS https://bootstrap.pypa.io/get-pip.py | ./bin/python
@@ -56,7 +56,7 @@ pip install homeassistant
 EOF
 
     echo ">>> Creating systemd service..."
-    cat >/etc/systemd/system/home-assistant.service <<'EOL'
+    cat >/etc/systemd/system/home-assistant.service <<EOL
 [Unit]
 Description=Home Assistant
 After=network-online.target
@@ -65,7 +65,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=homeassistant
-ExecStart=/srv/homeassistant/bin/hass -c "/home/homeassistant/.homeassistant"
+ExecStart=/srv/homeassistant/bin/hass -c "/srv/homeassistant"
 Restart=on-failure
 
 [Install]
@@ -74,17 +74,17 @@ EOL
 
     echo ">>> Enabling and starting Home Assistant service..."
     systemctl daemon-reexec
-    systemctl enable home-assistant
-    systemctl start home-assistant
+    systemctl enable home-assistant.service
+    systemctl start home-assistant.service
 
     echo ">>> Setting up weekly auto-update..."
-    cat >/etc/cron.weekly/home-assistant-update <<'EOL'
+    cat >/etc/cron.weekly/home-assistant-update <<EOL
 #!/bin/bash
-sudo -u homeassistant -H bash <<EOF
+su - homeassistant -c "
 source /srv/homeassistant/bin/activate
 pip install --upgrade pip wheel setuptools homeassistant
-EOF
-systemctl restart home-assistant
+"
+systemctl restart home-assistant.service
 EOL
 
     chmod +x /etc/cron.weekly/home-assistant-update
@@ -95,7 +95,7 @@ EOL
 
 elif [ "$MODE" == "fix" ]; then
     echo ">>> Fixing venv in /srv/homeassistant..."
-    sudo -u homeassistant -H bash <<'EOF'
+    sudo -u homeassistant -H bash <<EOF
 cd /srv/homeassistant
 rm -rf bin include lib lib64 pyvenv.cfg
 python3 -m venv --without-pip .
@@ -103,7 +103,7 @@ curl -sS https://bootstrap.pypa.io/get-pip.py | ./bin/python
 source bin/activate
 pip install --upgrade pip wheel setuptools homeassistant
 EOF
-    systemctl restart home-assistant || true
+    systemctl restart home-assistant.service || true
     echo ">>> venv fixed. Home Assistant restarted (if service exists)."
 
 else
