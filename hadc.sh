@@ -2,7 +2,7 @@
 set -e
 
 echo "======================================="
-echo "   Home Assistant Docker Setup Script"
+echo "   Home Assistant Docker Install Script"
 echo "======================================="
 
 # 1️⃣ Update system
@@ -32,21 +32,32 @@ echo ">>> Installing Docker..."
 apt-get update -y
 apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
 
-# 5️⃣ Create HA user (optional)
-echo ">>> Creating homeassistant user..."
-id -u homeassistant &>/dev/null || useradd -rm homeassistant
-usermod -aG docker homeassistant
+# 5️⃣ Configure overlay2 storage driver
+echo ">>> Configuring Docker storage driver..."
+mkdir -p /etc/docker
+cat >/etc/docker/daemon.json <<EOL
+{
+  "storage-driver": "overlay2"
+}
+EOL
+systemctl restart docker
 
-# 6️⃣ Create config folder
+# 6️⃣ Remove broken Home Assistant container/images
+echo ">>> Cleaning up broken Home Assistant containers/images..."
+docker rm -f homeassistant 2>/dev/null || true
+docker rmi ghcr.io/home-assistant/home-assistant:stable 2>/dev/null || true
+docker system prune -af
+
+# 7️⃣ Create config folder
 echo ">>> Creating HA config folder..."
 mkdir -p /srv/homeassistant
-chown homeassistant:homeassistant /srv/homeassistant
+chown root:root /srv/homeassistant
 
-# 7️⃣ Pull Home Assistant Docker image
+# 8️⃣ Pull fresh Home Assistant Docker image
 echo ">>> Pulling Home Assistant Docker image..."
 docker pull ghcr.io/home-assistant/home-assistant:stable
 
-# 8️⃣ Create systemd service
+# 9️⃣ Create systemd service
 echo ">>> Creating systemd service..."
 cat >/etc/systemd/system/home-assistant-docker.service <<EOL
 [Unit]
@@ -69,7 +80,7 @@ ExecStop=/usr/bin/docker stop homeassistant
 WantedBy=multi-user.target
 EOL
 
-# 9️⃣ Enable and start service
+# 10️⃣ Enable and start the service
 echo ">>> Enabling and starting Home Assistant Docker service..."
 systemctl daemon-reexec
 systemctl enable home-assistant-docker.service
