@@ -1,80 +1,151 @@
 #!/bin/bash
 
+# Script to diagnose and fix issues with network bridge vmbr1
+
+# Configuration variables
+BRIDGE_NAME="vmbr1"
+PHYSICAL_IFACE="${1:-eth1}"  # Default to eth1, override with first argument
+CONFIG_FILE="/etc/network/interfaces"
+LOG_FILE="/var/log/fix-vmbr1-bridge.log"
+USE_DHCP="yes"  # Set to "no" for static IP
+STATIC_IP="192.168.1.100"
+STATIC_NETMASK="255.255.255.0"
+STATIC_GATEWAY="192.168.1.1"
+STATIC_DNS="8.8.8.8"
+
+# Function to log messages
+log_message() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
+}
+
 # Exit on any error
 set -e
 
-# Variables
-BRIDGE_NAME="vmbr2"
-PHYSICAL_IFACE="eth1"  # Replace with your physical network interface (e.g., enp0s3)
-NETWORK_CONFIG="/etc/network/interfaces"
-
 # Check if script is run as root
 if [ "$EUID" -ne 0 ]; then
-    echo "This script must be run as root"
+    log_message "ERROR: This script must be run as root"
+    echo "Please run with sudo or as root"
     exit 1
 fi
 
-# Check if the physical interface exists
+# Create log file if it doesn't exist
+touch "$LOG_FILE" || { echo "Cannot create log file at $LOG_FILE"; exit 1; }
+log_message "Starting repair for bridge $BRIDGE_NAME"
+
+# Check if bridge exists
+if ! ip link show "$BRIDGE_NAME" > /dev/null 2>&1; then
+    log_message "Bridge $BRIDGE_NAME does not exist, creating it"
+    ip link add name "$BRIDGE_NAME" type bridge || { log_message "ERROR: Failed to create $BRIDGE_NAME"; exit 1; }
+fi
+
+# Ensure bridge is up
+if ! ip link show "$BRIDGE_NAME" | grep -q "state UP"; then
+    log_message "Bringing $BRIDGE_NAME up"
+    ip link set "$BRIDGE_NAME" up || { log_message "ERROR: Failed to bring $BRIDGE_NAME up"; exit 1; }
+fi
+
+# Validate physical interface
 if ! ip link show "$PHYSICAL_IFACE" > /dev/null 2>&1; then
-    echo "Physical interface $PHYSICAL_IFACE does not exist"
+    log_message "ERROR: Physical interface $PHYSICAL_IFACE does not exist"
+    echo "Available interfaces:"
+    ip link show | grep '^[0-9]' | cut -d: -f2 | awk '{print $1}'
     exit 1
 fi
 
-# Check if bridge already exists
-if ip link show "$BRIDGE_NAME" > /dev/null 2>&1; then
-    echo "Bridge $BRIDGE_NAME already exists"
-    exit 1
+# Check if physical interface is attached to bridge
+if ! ip link show master "$BRIDGE_NAME" | grep -q "$PHYSICAL_IFACE"; then
+    log_message "Attaching $PHYSICAL_IFACE to $BRIDGE_NAME"
+    ip link set "$PHYSICAL_IFACE" master "$BRIDGE_NAME" || { log_message "ERROR: Failed to attach $PHYSICAL_IFACE"; exit 1; }
 fi
 
-# Create the bridge
-ip link add name "$BRIDGE_NAME" type bridge
-ip link set "$BRIDGE_NAME" up
+# Ensure physical interface is up
+if ! ip link show "$PHYSICAL_IFACE" | grep -q "state UP"; then
+    log_message "Bringing $PHYSICAL_IFACE up"
+    ip link set "$PHYSICAL_IFACE" up || { log_message "ERROR: Failed to bring $PHYSICAL_IFACE up"; exit 1; }
+fi
 
-# Attach the physical interface to the bridge
-ip link set "$PHYSICAL_IFACE" master "$BRIDGE_NAME"
-ip link set "$PHYSICAL_IFACE" up
-
-# Optional: Enable DHCP on the bridge (comment out if using static IP)
-ip addr flush dev "$PHYSICAL_IFACE"
-dhclient "$BRIDGE_NAME"
+# Configure IP (DHCP or static)
+if [ "$USE_DHCP" = "yes" ]; then
+    log_message "Configuring $BRIDGE_NAME with DHCP"
+    ip addr flush dev "$PHYSICAL_IFACE" || log_message "Warning: Failed to flush IP from $PHYSICAL_IFACE"
+    ip addr flush dev "$BRIDGE_NAME" || log_message "Warning: Failed to flush IP from $BRIDGE_NAME"
+    dhclient "$BRIDGE_NAME" || { log_message "ERROR: Failed to obtain DHCP lease"; exit 1; }
+else
+    log_message "Configuring $BRIDGE_NAME with static IP $STATIC_IP"
+    ip addr flush dev "$PHYSICAL_IFACE" || log_message "Warning: Failed to flush IP from $PHYSICAL_IFACE"
+    ip addr flush dev "$BRIDGE_NAME" || log_message "Warning: Failed to flush IP from $BRIDGE_NAME"
+    ip addr add "$STATIC_IP/$STATIC_NETMASK" dev "$BRIDGE_NAME" || { log_message "ERROR: Failed to set static IP"; exit 1; }
+    ip route add default via "$STATIC_GATEWAY" || log_message "Warning: Failed to set default gateway"
+    echo "nameserver $STATIC_DNS" > /etc/resolv.conf
+fi
 
 # Backup existing network configuration
-if [ -f "$NETWORK_CONFIG" ]; then
-    cp "$NETWORK_CONFIG" "$NETWORK_CONFIG.bak"
-    echo "Backed up $NETWORK_CONFIG to $NETWORK_CONFIG.bak"
+if [ -f "$CONFIG_FILE" ]; then
+    cp "$CONFIG_FILE" "${CONFIG_FILE}.$(date +%Y%m%d%H%M%S).bak"
+    log_message "Backed up $CONFIG_FILE"
 fi
 
-# Add bridge configuration to /etc/network/interfaces
-cat >> "$NETWORK_CONFIG" << EOF
+# Remove old bridge configuration to avoid duplicates
+log_message "Removing old $BRIDGE_NAME configuration from $CONFIG_FILE"
+sed -i "/^auto $BRIDGE_NAME/,/^$/d" "$CONFIG_FILE" || log_message "Warning: Failed to remove old $BRIDGE_NAME config"
 
-# Bridge setup for $BRIDGE_NAME
+# Add updated bridge configuration
+log_message "Updating $CONFIG_FILE with bridge configuration"
+cat >> "$CONFIG_FILE" << EOF
+
+# Bridge setup for $BRIDGE_NAME (fixed $(date))
 auto $BRIDGE_NAME
-iface $BRIDGE_NAME inet dhcp
+iface $BRIDGE_NAME inet ${USE_DHCP:-yes} dhcp
     bridge_ports $PHYSICAL_IFACE
     bridge_stp off
     bridge_fd 0
+    bridge_maxwait 0
 EOF
 
-# Alternative: Static IP configuration (uncomment and modify if needed)
-# cat >> "$NETWORK_CONFIG" << EOF
-#
-# # Bridge setup for $BRIDGE_NAME
-# auto $BRIDGE_NAME
-# iface $BRIDGE_NAME inet static
-#     address 192.168.1.100
-#     netmask 255.255.255.0
-#     gateway 192.168.1.1
-#     bridge_ports $PHYSICAL_IFACE
-#     bridge_stp off
-#     bridge_fd 0
-# EOF
+# Static IP configuration (if enabled)
+if [ "$USE_DHCP" != "yes" ]; then
+    cat >> "$CONFIG_FILE" << EOF
 
-echo "Bridge $BRIDGE_NAME created and configured successfully"
-echo "Physical interface $PHYSICAL_IFACE is attached to $BRIDGE_NAME"
-
-# Restart networking to apply changes (adjust for your system if needed)
-if systemctl restart networking > /dev/null 2>&1; then
-    echo "Networking service restarted"
-else
-    echo "Failed to restart networking service. Please restart manually or reboot."
+# Bridge setup for $BRIDGE_NAME (static, fixed $(date))
+auto $BRIDGE_NAME
+iface $BRIDGE_NAME inet static
+    address $STATIC_IP
+    netmask $STATIC_NETMASK
+    gateway $STATIC_GATEWAY
+    dns-nameservers $STATIC_DNS
+    bridge_ports $PHYSICAL_IFACE
+    bridge_stp off
+    bridge_fd 0
+    bridge_maxwait 0
+EOF
 fi
+
+# Restart networking
+log_message "Restarting networking service"
+if systemctl restart networking > /dev/null 2>&1; then
+    log_message "Networking service restarted successfully"
+elif service networking restart > /dev/null 2>&1; then
+    log_message "Networking service restarted successfully (using service)"
+else
+    log_message "Warning: Could not restart networking service. Manual restart or reboot required."
+    echo "Please restart networking manually or reboot the system."
+fi
+
+# Verify bridge status
+if ip link show "$BRIDGE_NAME" | grep -q "state UP"; then
+    log_message "Bridge $BRIDGE_NAME is up and running"
+    echo "Success: Bridge $BRIDGE_NAME repaired and attached to $PHYSICAL_IFACE"
+else
+    log_message "ERROR: Bridge $BRIDGE_NAME is not up"
+    echo "Failed to verify bridge status. Check $LOG_FILE for details."
+    exit 1
+fi
+
+# Proxmox-specific note
+if [ -d "/etc/pve" ]; then
+    log_message "Detected Proxmox environment. Ensure VM network settings use $BRIDGE_NAME"
+    echo "Proxmox detected. Verify your VM is using bridge $BRIDGE_NAME in network settings."
+fi
+
+log_message "Repair completed successfully"
+echo "Repair complete. Logs available at $LOG_FILE"
